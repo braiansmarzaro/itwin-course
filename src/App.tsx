@@ -5,49 +5,38 @@
 
 import "./App.scss";
 
-import type { ScreenViewport } from "@itwin/core-frontend";
+import { BrowserAuthorizationClient } from "@itwin/browser-authorization";
+import type { IModelConnection, ScreenViewport } from "@itwin/core-frontend";
 import { FitViewTool, IModelApp, StandardViewId } from "@itwin/core-frontend";
 import { FillCentered } from "@itwin/core-react";
 import { ProgressLinear } from "@itwin/itwinui-react";
-import {
-  MeasurementActionToolbar,
-  MeasureTools,
-  MeasureToolsUiItemsProvider,
-} from "@itwin/measure-tools-react";
-import {
-  AncestorsNavigationControls,
-  CopyPropertyTextContextMenuItem,
-  PropertyGridManager,
-  PropertyGridUiItemsProvider,
-  ShowHideNullValuesSettingsMenuItem,
-} from "@itwin/property-grid-react";
-import {
-  TreeWidget,
-  TreeWidgetUiItemsProvider,
-} from "@itwin/tree-widget-react";
-import {
-  useAccessToken,
-  Viewer,
-  ViewerContentToolsProvider,
-  ViewerNavigationToolsProvider,
-  ViewerPerformance,
-  ViewerStatusbarItemsProvider,
-} from "@itwin/web-viewer-react";
+import { useAccessToken, Viewer } from "@itwin/web-viewer-react";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 
-import { Auth } from "./Auth";
+import { Visualization } from "./Visualization";
+import { DisplayStyleSettingsProps } from "@itwin/core-common";
+import { SmartDeviceDecorator } from "./components/decorators/SmartDeviceDecorator";
+
 import { history } from "./history";
 
 const App: React.FC = () => {
   const [iModelId, setIModelId] = useState(process.env.IMJS_IMODEL_ID);
   const [iTwinId, setITwinId] = useState(process.env.IMJS_ITWIN_ID);
-  const [changesetId, setChangesetId] = useState(
-    process.env.IMJS_AUTH_CLIENT_CHANGESET_ID
-  );
 
   const accessToken = useAccessToken();
 
-  const authClient = Auth.getClient();
+  const authClient = useMemo(
+    () =>
+      new BrowserAuthorizationClient({
+        scope: process.env.IMJS_AUTH_CLIENT_SCOPES ?? "",
+        clientId: process.env.IMJS_AUTH_CLIENT_CLIENT_ID ?? "",
+        redirectUri: process.env.IMJS_AUTH_CLIENT_REDIRECT_URI ?? "",
+        postSignoutRedirectUri: process.env.IMJS_AUTH_CLIENT_LOGOUT_URI,
+        responseType: "code",
+        authority: process.env.IMJS_AUTH_AUTHORITY,
+      }),
+    []
+  );
 
   const login = useCallback(async () => {
     try {
@@ -62,30 +51,35 @@ const App: React.FC = () => {
   }, [login]);
 
   useEffect(() => {
-    const urlParams = new URLSearchParams(window.location.search);
-    if (urlParams.has("iTwinId")) {
-      setITwinId(urlParams.get("iTwinId") as string);
+    if (accessToken) {
+      const urlParams = new URLSearchParams(window.location.search);
+      if (urlParams.has("iTwinId")) {
+        setITwinId(urlParams.get("iTwinId") as string);
+      } else {
+        if (!process.env.IMJS_ITWIN_ID) {
+          throw new Error(
+            "Please add a valid iTwin ID in the .env file and restart the application or add it to the iTwinId query parameter in the url and refresh the page. See the README for more information."
+          );
+        }
+      }
+
+      if (urlParams.has("iModelId")) {
+        setIModelId(urlParams.get("iModelId") as string);
+      } else {
+        if (!process.env.IMJS_IMODEL_ID) {
+          throw new Error(
+            "Please add a valid iModel ID in the .env file and restart the application or add it to the iModelId query parameter in the url and refresh the page. See the README for more information."
+          );
+        }
+      }
     }
-    if (urlParams.has("iModelId")) {
-      setIModelId(urlParams.get("iModelId") as string);
-    }
-    if (urlParams.has("changesetId")) {
-      setChangesetId(urlParams.get("changesetId") as string);
-    }
-  }, []);
+  }, [accessToken]);
 
   useEffect(() => {
-    let url = `viewer?iTwinId=${iTwinId}`;
-
-    if (iModelId) {
-      url = `${url}&ModelId=${iModelId}`;
+    if (accessToken && iTwinId && iModelId) {
+      history.push(`?iTwinId=${iTwinId}&iModelId=${iModelId}`);
     }
-
-    if (changesetId) {
-      url = `${url}&changesetId=${changesetId}`;
-    }
-    history.push(url);
-  }, [iTwinId, iModelId, changesetId]);
+  }, [accessToken, iTwinId, iModelId]);
 
   /** NOTE: This function will execute the "Fit View" tool after the iModel is loaded into the Viewer.
    * This will provide an "optimal" view of the model. However, it will override any default views that are
@@ -99,12 +93,6 @@ const App: React.FC = () => {
         const start = new Date();
         const intvl = setInterval(() => {
           if (viewPort.areAllTileTreesLoaded) {
-            ViewerPerformance.addMark("TilesLoaded");
-            ViewerPerformance.addMeasure(
-              "TileTreesLoaded",
-              "ViewerStarting",
-              "TilesLoaded"
-            );
             clearInterval(intvl);
             resolve(true);
           }
@@ -128,13 +116,24 @@ const App: React.FC = () => {
     [viewConfiguration]
   );
 
-  const onIModelAppInit = useCallback(async () => {
-    // iModel now initialized
-    await TreeWidget.initialize();
-    await PropertyGridManager.initialize();
-    await MeasureTools.startup();
-    MeasurementActionToolbar.setDefaultActionProvider();
-  }, []);
+  const onIModelConnected = (_imodel: IModelConnection) => {
+
+    IModelApp.viewManager.onViewOpen.addOnce(async (vp: ScreenViewport) => {
+
+      const viewStyle: DisplayStyleSettingsProps = {
+        viewflags: {
+          visEdges: false,
+          shadows: true
+        }
+      }
+      vp.overrideDisplayStyle(viewStyle);
+
+      Visualization.hideHouseExterior(vp);
+
+      IModelApp.viewManager.addDecorator(new SmartDeviceDecorator(vp));
+    })
+  }
+
 
   return (
     <div className="viewer-container">
@@ -146,43 +145,12 @@ const App: React.FC = () => {
         </FillCentered>
       )}
       <Viewer
-        iTwinId={iTwinId ?? ""}
-        iModelId={iModelId ?? ""}
-        changeSetId={changesetId}
+        iTwinId={iTwinId}
+        iModelId={iModelId}
         authClient={authClient}
         viewCreatorOptions={viewCreatorOptions}
-        enablePerformanceMonitors={true} // see description in the README (https://www.npmjs.com/package/@itwin/web-viewer-react)
-        onIModelAppInit={onIModelAppInit}
-        uiProviders={[
-          new ViewerNavigationToolsProvider(),
-          new ViewerContentToolsProvider({
-            vertical: {
-              measureGroup: false,
-            },
-          }),
-          new ViewerStatusbarItemsProvider(),
-          new TreeWidgetUiItemsProvider(),
-          new PropertyGridUiItemsProvider({
-            propertyGridProps: {
-              autoExpandChildCategories: true,
-              ancestorsNavigationControls: (props) => (
-                <AncestorsNavigationControls {...props} />
-              ),
-              contextMenuItems: [
-                (props) => <CopyPropertyTextContextMenuItem {...props} />,
-              ],
-              settingsMenuItems: [
-                (props) => (
-                  <ShowHideNullValuesSettingsMenuItem
-                    {...props}
-                    persist={true}
-                  />
-                ),
-              ],
-            },
-          }),
-          new MeasureToolsUiItemsProvider(),
-        ]}
+        enablePerformanceMonitors={true} // see description in the README (https://www.npmjs.com/package/@itwin/desktop-viewer-react)
+        onIModelConnected={onIModelConnected}
       />
     </div>
   );
